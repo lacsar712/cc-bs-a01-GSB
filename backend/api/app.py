@@ -1,3 +1,4 @@
+import math
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -52,6 +53,31 @@ def _iso(dt) -> str | None:
     return dt.isoformat()
 
 
+def _lock_json(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "span_code": row["span_code"],
+        "elevation_m": row["elevation_m"],
+        "locked_by": row["locked_by"],
+        "locked_at": _iso(row["locked_at"]),
+    }
+
+
+def _reading_json(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "span_code": row["span_code"],
+        "microstrain": row["microstrain"],
+        "elevation_m": row["elevation_m"],
+        "verdict": row["verdict"],
+        "reason": row["reason"],
+        "status": row["status"],
+        "created_by": row["created_by"],
+        "created_at": _iso(row["created_at"]),
+        "processed_at": _iso(row["processed_at"]),
+    }
+
+
 @app.before_server_start
 async def setup(_app, _loop):
     pool = await create_pool()
@@ -91,6 +117,107 @@ async def login(request):
     )
 
 
+@app.get("/api/elevation-locks")
+async def list_elevation_locks(request):
+    """锁定表与待锁表：测量员与复核员都可翻看。"""
+    if not _require_user(request):
+        return sanic_json({"detail": "未登录"}, status=401)
+    pool = request.app.ctx.pool
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT id, span_code, elevation_m, locked_by, locked_at
+                FROM span_elevation_locks
+                ORDER BY locked_at, id
+                """
+            )
+            locks = await cur.fetchall()
+            await cur.execute(
+                """
+                SELECT c.span_code
+                FROM span_catalog c
+                LEFT JOIN span_elevation_locks l ON l.span_code = c.span_code
+                WHERE l.span_code IS NULL
+                ORDER BY c.sort_no, c.span_code
+                """
+            )
+            pending = await cur.fetchall()
+    return sanic_json(
+        {
+            "locks": [_lock_json(r) for r in locks],
+            "pending": [r["span_code"] for r in pending],
+        }
+    )
+
+
+@app.post("/api/elevation-locks")
+async def create_elevation_lock(request):
+    """测量员锁定跨段高程；同一跨段至多锁成一笔，撞车当场拒。"""
+    user = _require_user(request)
+    if not user:
+        return sanic_json({"detail": "未登录"}, status=401)
+    if user["role"] != "writer":
+        return sanic_json({"detail": "仅测量员可锁定高程，复核员只读"}, status=403)
+    body = request.json or {}
+    span_code = str(body.get("span_code", "")).strip()
+    if not span_code:
+        return sanic_json({"detail": "跨段编号不能为空"}, status=400)
+    try:
+        elevation_m = float(body.get("elevation_m"))
+    except (TypeError, ValueError):
+        return sanic_json({"detail": "高程必须是数字（米）"}, status=400)
+    if not math.isfinite(elevation_m):
+        return sanic_json({"detail": "高程必须是有限数字（米）"}, status=400)
+
+    pool = request.app.ctx.pool
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO span_elevation_locks
+                    (span_code, elevation_m, locked_by, locked_at)
+                VALUES (%s, %s, %s, now())
+                ON CONFLICT (span_code) DO NOTHING
+                RETURNING id, span_code, elevation_m, locked_by, locked_at
+                """,
+                (span_code, elevation_m, user["username"]),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                await cur.execute(
+                    """
+                    SELECT id, span_code, elevation_m, locked_by, locked_at
+                    FROM span_elevation_locks
+                    WHERE span_code = %s
+                    """,
+                    (span_code,),
+                )
+                existing = await cur.fetchone()
+        await conn.commit()
+
+    if row is None:
+        return sanic_json(
+            {
+                "detail": (
+                    f"跨段 {span_code} 高程已锁定为 "
+                    f"{existing['elevation_m']} m（{existing['locked_by']} 锁定），"
+                    "不得重复锁定"
+                ),
+                "lock": _lock_json(existing),
+            },
+            status=409,
+        )
+
+    return sanic_json(
+        {
+            **_lock_json(row),
+            "message": f"跨段 {span_code} 高程 {row['elevation_m']} m 已锁定",
+        },
+        status=201,
+    )
+
+
 @app.get("/api/readings")
 async def list_readings(request):
     if not _require_user(request):
@@ -100,33 +227,22 @@ async def list_readings(request):
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT id, span_code, microstrain, verdict, reason, status,
-                       created_by, created_at, processed_at
+                SELECT id, span_code, microstrain, elevation_m, verdict, reason,
+                       status, created_by, created_at, processed_at
                 FROM strain_readings
                 ORDER BY id DESC
                 """
             )
             rows = await cur.fetchall()
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "id": r["id"],
-                "span_code": r["span_code"],
-                "microstrain": r["microstrain"],
-                "verdict": r["verdict"],
-                "reason": r["reason"],
-                "status": r["status"],
-                "created_by": r["created_by"],
-                "created_at": _iso(r["created_at"]),
-                "processed_at": _iso(r["processed_at"]),
-            }
-        )
-    return sanic_json(out)
+    return sanic_json([_reading_json(r) for r in rows])
 
 
 @app.post("/api/readings")
 async def create_reading(request):
+    """报送微应变：入队与高程冻结在同一条 INSERT 里一次写完。
+
+    跨段尚未锁定高程时 SELECT 不到锁定行，整笔不入队，直接退回。
+    """
     user = _require_user(request)
     if not user:
         return sanic_json({"detail": "未登录"}, status=401)
@@ -140,34 +256,45 @@ async def create_reading(request):
         microstrain = float(body.get("microstrain"))
     except (TypeError, ValueError):
         return sanic_json({"detail": "微应变必须是数字"}, status=400)
+    if not math.isfinite(microstrain):
+        return sanic_json({"detail": "微应变必须是有限数字"}, status=400)
 
     pool = request.app.ctx.pool
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT INTO strain_readings (span_code, microstrain, status, created_by, created_at)
-                VALUES (%s, %s, 'pending', %s, now())
-                RETURNING id, span_code, microstrain, verdict, reason, status,
-                          created_by, created_at, processed_at
+                INSERT INTO strain_readings
+                    (span_code, microstrain, elevation_m, status, created_by, created_at)
+                SELECT l.span_code, %s, l.elevation_m, 'pending', %s, now()
+                FROM span_elevation_locks l
+                WHERE l.span_code = %s
+                RETURNING id, span_code, microstrain, elevation_m, verdict, reason,
+                          status, created_by, created_at, processed_at
                 """,
-                (span_code, microstrain, user["username"]),
+                (microstrain, user["username"], span_code),
             )
             row = await cur.fetchone()
         await conn.commit()
 
+    if row is None:
+        return sanic_json(
+            {
+                "detail": (
+                    f"跨段 {span_code} 尚未锁定高程，整笔退回："
+                    "请先在高程锁定专页完成锁定"
+                )
+            },
+            status=409,
+        )
+
     return sanic_json(
         {
-            "id": row["id"],
-            "span_code": row["span_code"],
-            "microstrain": row["microstrain"],
-            "verdict": row["verdict"],
-            "reason": row["reason"],
-            "status": row["status"],
-            "created_by": row["created_by"],
-            "created_at": _iso(row["created_at"]),
-            "processed_at": None,
-            "message": "已入队，后台工人将认领并判定",
+            **_reading_json(row),
+            "message": (
+                f"已入队候审，高程 {row['elevation_m']} m 已随单冻结，"
+                "后台工人将认领并判定"
+            ),
         },
         status=201,
     )

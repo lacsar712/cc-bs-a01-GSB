@@ -108,6 +108,47 @@ th {
   background: #eceff1;
 }
 
+.nav {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.nav button {
+  background: #eceff1;
+  color: #37474f;
+}
+
+.nav button.active {
+  background: #1565c0;
+  color: #fff;
+}
+
+.page-title {
+  margin: 0 0 0.25rem;
+  font-size: 1.2rem;
+}
+
+.samples {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.9rem;
+}
+
+.samples li {
+  margin-bottom: 0.35rem;
+}
+
+.samples code {
+  background: #eceff1;
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
+}
+
+.reject {
+  color: #b00020;
+}
+
 .tag {
   display: inline-block;
   padding: 0.15rem 0.45rem;
