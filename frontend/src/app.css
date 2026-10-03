@@ -129,3 +129,75 @@ th {
   background: #fff8e1;
   color: #f57f17;
 }
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.navbtn {
+  background: #eceff1;
+  color: #1a1a1a;
+}
+
+.navbtn.active {
+  background: #1565c0;
+  color: #fff;
+}
+
+.user {
+  font-size: 0.9rem;
+  color: #333;
+  margin: 0 0.25rem;
+}
+
+button.small {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+tr.clickable {
+  cursor: pointer;
+}
+
+tr.clickable:hover {
+  background: #f5f7fa;
+}
+
+pre.sample {
+  background: #263238;
+  color: #eceff1;
+  padding: 0.75rem 0.9rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+pre.sample.rejected {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  max-width: 520px;
+  width: 92%;
+  max-height: 85vh;
+  overflow-y: auto;
+}
